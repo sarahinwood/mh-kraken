@@ -73,18 +73,18 @@ all_samples = sorted(set(sample_key['Sample_name']))
 
 rule target:
     input:
-        'output/kraken/kraken_report.txt'
+        expand('output/kraken_{sample}/{sample}_kraken_report.txt', sample=all_samples)
 
 rule kraken:
     input:
-        r1 = expand('output/bbduk_trim/{sample}_r1.fq.gz', sample=all_samples),
-        r2 = expand('output/bbduk_trim/{sample}_r2.fq.gz', sample=all_samples),
+        r1 = 'output/bbduk_trim/{sample}_r1.fq.gz',
+        r2 = 'output/bbduk_trim/{sample}_r2.fq.gz',
         db = 'data/20180917-krakendb'
     output:
-        out = 'output/kraken/kraken_out.txt',
-        report = 'output/kraken/kraken_report.txt'
+        out = 'output/kraken_{sample}/{sample}_kraken_out.txt',
+        report = 'output/kraken_{sample}/{sample}_kraken_report.txt'
     log:
-        'output/logs/kraken.log'
+        'output/logs/_kraken_out{sample}.log'
     threads:
         20
     singularity:
