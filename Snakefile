@@ -3,6 +3,7 @@
 import pathlib2
 import pandas
 import os
+import peppy
 
 #############
 # FUNCTIONS #
@@ -47,25 +48,32 @@ def sample_name_to_fastq(wildcards):
 # GLOBALS #
 ###########
 
-read_dir = 'data/reads'
+##this parses the config & sample key files into an object named pep
+pepfile: 'data/config.yaml'
+##can now use this to generate list of all samples
+all_dna_samples=pep.sample_table["sample_name"]
 
+
+read_dir = 'data/rna_reads'
 sample_key_file = 'data/sample_key.csv'
 
 bbduk_adapters = '/adapters.fa'
+bbduk_ref = '/phix174_ill.ref.fa.gz'
 
 #containers
 bbduk_container = 'shub://TomHarrop/singularity-containers:bbmap_38.00'
-kraken_container = 'shub://TomHarrop/singularity-containers:kraken_2.0.7beta'
 
 #########
 # SETUP #
 #########
 
+##https://benlangmead.github.io/aws-indexes/k2 for kraken db viral (5/17/2021)
+
 # generate name to filename dictionary
 all_fastq = find_read_files(read_dir)
 
 sample_key = pandas.read_csv(sample_key_file)
-all_samples = sorted(set(sample_key['Sample_name']))
+all_rna_samples = sorted(set(sample_key['Sample_name']))
 
 #########
 # RULES #
@@ -73,24 +81,192 @@ all_samples = sorted(set(sample_key['Sample_name']))
 
 rule target:
     input:
-        expand('output/kraken_{sample}/{sample}_kraken_report.txt', sample=all_samples)
+        expand('output/kraken_rna/{sample}/{sample}_kraken_report.txt', sample=all_rna_samples),
+        expand('output/kraken_dna/{sample}/{sample}_kraken_report.txt', sample=all_dna_samples),
+        'output/kraken_dna/genome/genome_kraken_report.txt'
+
+##########################
+## Genome DNAseq Kraken ##
+##########################
+
+rule kraken_genome:
+    input:
+        r1 = 'output/bbduk_trim_dna/genome/genome_trimr1.fq.gz',
+        r2 = 'output/bbduk_trim_dna/genome/genome_trimr2.fq.gz',
+        db = 'kraken_db/viral'
+    output:
+        out = 'output/kraken_dna/genome/genome_kraken_out.txt',
+        report = 'output/kraken_dna/genome/genome_kraken_report.txt'
+    log:
+        'output/logs/kraken_out_genome.log'
+    threads:
+        20
+    shell:
+        'bin/kraken_v2.1.2/kraken2 '
+        '--threads {threads} '
+        '--db {input.db} '
+        '--paired '
+        '--output {output.out} '
+        '--report {output.report} '
+        '--use-names '
+        '{input.r1} {input.r2} '
+        '&> {log}'
+
+##trim and decontaminate DNA reads to map onto genome
+rule bbduk_trim_genome:
+    input:
+        filr1 = 'output/bbduk_trim_dna/genome/genome_filr1.fq.gz',
+        filr2 = 'output/bbduk_trim_dna/genome/genome_filr2.fq.gz'
+    output:
+        trimr1 = 'output/bbduk_trim_dna/genome/genome_trimr1.fq.gz',
+        trimr2 = 'output/bbduk_trim_dna/genome/genome_trimr2.fq.gz',
+        t_stats = 'output/bbduk_trim_dna/genome/genome/trim-stats.txt'
+    log:
+        trim = 'output/logs/bbduk_trim_dna/genome_trim.log'
+    params:
+        adapters = bbduk_adapters
+    threads:
+        20
+    singularity:
+        bbduk_container
+    shell:
+        'bbduk.sh '
+        'threads={threads} '
+        'in1={input.filr1} '
+        'in2={input.filr2} '
+        'int=f '
+        'out1={output.trimr1} '
+        'out2={output.trimr2} '
+        'ref={params.adapters} '
+        'ktrim=r k=23 mink=11 hdist=1 tpe tbo '
+        'forcetrimmod=5 '
+        'stats={output.t_stats} '
+        '2> {log.trim} '
+
+rule bbduk_filter_genome:  
+    input:
+        r1 = 'data/dna_reads/genome_r1.fastq.gz',
+        r2 = 'data/dna_reads/genome_r2.fastq.gz'
+    output:
+        filr1 = 'output/bbduk_trim_dna/genome/genome_filr1.fq.gz',
+        filr2 = 'output/bbduk_trim_dna/genome/genome_filr2.fq.gz',
+        f_stats = 'output/bbduk_trim_dna/genome/genome_filter-stats.txt'
+    log:
+        filter = 'output/logs/bbduk_trim_dna/genome_filter.log'
+    params:
+        ref = bbduk_ref
+    threads:
+        20
+    singularity:
+        bbduk_container
+    shell:
+        'bbduk.sh '
+        'threads={threads} '
+        'in1={input.r1} '
+        'in2={input.r2} '
+        'out1={output.filr1} '
+        'out2={output.filr2} '
+        'ref={params.ref} '
+        'hdist=1 '
+        'stats={output.f_stats} '       
+        '2> {log.filter} ' 
+
+#######################
+## Pop DNAseq Kraken ##
+#######################
+
+rule kraken_pop:
+    input:
+        reads = 'output/bbduk_trim_dna/{sample}/{sample}_trim.fq.gz',
+        db = 'kraken_db/viral'
+    output:
+        out = 'output/kraken_dna/{sample}/{sample}_kraken_out.txt',
+        report = 'output/kraken_dna/{sample}/{sample}_kraken_report.txt'
+    log:
+        'output/logs/kraken_out_{sample}.log'
+    threads:
+        20
+    shell:
+        'bin/kraken_v2.1.2/kraken2 '
+        '--threads {threads} '
+        '--db {input.db} '
+        '--output {output.out} '
+        '--report {output.report} '
+        '--use-names '
+        '{input.reads} '
+        '&> {log}'
+
+
+##trim and decontaminate DNA reads to map onto genome
+rule bbduk_trim_dna:
+    input:
+        fastq = 'output/bbduk_trim_dna/{sample}/{sample}_filr.fq.gz'
+    output:
+        trim_fastq = 'output/bbduk_trim_dna/{sample}/{sample}_trim.fq.gz',
+        t_stats = 'output/bbduk_trim_dna/{sample}/trim-stats.txt'
+    log:
+        trim = 'output/logs/bbduk_trim_dna/{sample}_trim.log'
+    params:
+        adapters = bbduk_adapters
+    threads:
+        20
+    singularity:
+        bbduk_container
+    shell:
+        'bbduk.sh '
+        'threads={threads} '
+        'in={input.fastq} '
+        'int=t '
+        'out={output.trim_fastq} '
+        'ref={params.adapters} '
+        'ktrim=r k=23 mink=11 hdist=1 tpe tbo '
+        'forcetrimmod=5 '
+        'stats={output.t_stats} '
+        '2> {log.trim} '
+
+rule bbduk_filter_dna:  
+    input:
+        fastq = 'data/dna_reads/{sample}.fastq'
+    output:
+        fastq = 'output/bbduk_trim_dna/{sample}/{sample}_filr.fq.gz',
+        f_stats = 'output/bbduk_trim_dna/{sample}/filter-stats.txt'
+    log:
+        filter = 'output/logs/bbduk_trim_dna/{sample}_filter.log'
+    params:
+        ref = bbduk_ref
+    threads:
+        20
+    singularity:
+        bbduk_container
+    shell:
+        'bbduk.sh '
+        'threads={threads} '
+        'in={input.fastq} '
+        'int=t '
+        'out={output.fastq} '
+        'ref={params.ref} '
+        'hdist=1 '
+        'stats={output.f_stats} '       
+        '2> {log.filter} ' 
+
+###################
+## RNAseq Kraken ##
+###################
 
 rule kraken:
     input:
         r1 = 'output/bbduk_trim/{sample}_r1.fq.gz',
         r2 = 'output/bbduk_trim/{sample}_r2.fq.gz',
-        db = 'data/20180917-krakendb'
+        db = 'kraken_db/viral'
     output:
-        out = 'output/kraken_{sample}/{sample}_kraken_out.txt',
-        report = 'output/kraken_{sample}/{sample}_kraken_report.txt'
+        out = 'output/kraken_rna/{sample}/{sample}_kraken_out.txt',
+        report = 'output/kraken_rna/{sample}/{sample}_kraken_report.txt'
     log:
-        'output/logs/_kraken_out{sample}.log'
+        'output/logs/kraken_out_{sample}.log'
     threads:
         20
-    singularity:
-        kraken_container
     shell:
-        'kraken2 '
+        'bin/kraken_v2.1.2/kraken2 '
         '--threads {threads} '
         '--db {input.db} '
         '--paired '
